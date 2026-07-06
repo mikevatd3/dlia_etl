@@ -1,0 +1,21 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "dlia-etl"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.13"
+dependencies = [
+    "dotenv>=0.9.9",
+    "pandas>=3.0.3",
+    "pandera>=0.32.1",
+    "psycopg>=3.3.4",
+    "sqlalchemy>=2.0.51",
+    "tqdm>=4.68.3",
+]
+
+[project.scripts]
+dlia-etl = "dlia_etl.cli:main"
