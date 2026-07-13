@@ -1,6 +1,7 @@
 """CLI entry point for dlia-etl."""
 
 import argparse
+import logging
 import sys
 
 from dlia_etl.db import get_engine
@@ -35,7 +36,16 @@ def main():
         help="Target database name (default: ipds)",
     )
 
+    run_parser.add_argument(
+        "-v", "--verbose", action="store_true", help="Show INFO-level log messages",
+    )
+
     args = parser.parse_args()
+
+    logging.basicConfig(
+        level=logging.INFO if getattr(args, "verbose", False) else logging.WARNING,
+        format="%(message)s",
+    )
 
     # Import tasks to trigger registration
     import dlia_etl.tasks  # noqa: F401
