@@ -1,1 +1,1 @@
-from dlia_etl.tasks import property_sales, vacancy
+from dlia_etl.tasks import property_sales, vacancy, vacancy_geocode
