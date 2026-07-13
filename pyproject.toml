@@ -10,6 +10,7 @@ readme = "README.md"
 requires-python = ">=3.13"
 dependencies = [
     "dotenv>=0.9.9",
+    "dressy",
     "pandas>=3.0.3",
     "pandera>=0.32.1",
     "psycopg>=3.3.4",
@@ -19,3 +20,6 @@ dependencies = [
 
 [project.scripts]
 dlia-etl = "dlia_etl.cli:main"
+
+[tool.uv.sources]
+dressy = { path = "../dressy", editable = true }

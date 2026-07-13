@@ -15,7 +15,7 @@ from dlia_etl.schemas.vacancy import VacancyModel
 TABLE_NAME = "vericast"
 
 
-def read_frames_slowly(datasets, chunksize=10_000):
+def read_frames_slowly(datasets, chunksize=50_000):
     for _, row in datasets.iterrows():
         path = row["path"]
 
@@ -37,18 +37,14 @@ def read_frames_slowly(datasets, chunksize=10_000):
             names=names
         ):
 
-            for col in [
+            chunk = chunk.drop([
                 "seasonal_start_suppression_date",
                 "seasonal_end_suppression_date",
-                "college_start_suppression_date",
-                "college_end_suppression_date",
-                "update_date",
-                "file_release_date",
-                "override_file_release_date",
-            ]:
-                chunk[col] = pd.to_datetime(chunk[col], errors="coerce")
+            ], axis=1)
 
-            chunk = chunk.assign(start_date=start_date, end_date=end_date)
+            chunk["start_date"] = start_date
+            chunk["end_date"] = end_date
+
             yield chunk
 
 
