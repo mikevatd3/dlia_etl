@@ -29,7 +29,7 @@ def run(_: Engine, target: Engine) -> TaskResult:
         rows_inserted = 0
         for chunk in tqdm(d.geocode_sql(
             q, 
-            chunksize=5000,
+            chunksize=5,
             columns={
                 "house_number": "HOUSE_NO",
                 "street_name":  "STREET",
