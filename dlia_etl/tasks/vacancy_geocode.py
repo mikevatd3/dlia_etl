@@ -1,5 +1,5 @@
 from tqdm import tqdm
-from sqlalchemy import Engine
+from sqlalchemy import Engine, text
 import pandas as pd
 
 from dlia_etl.registry import task, TaskResult
@@ -14,7 +14,10 @@ WRITE_SCHEMA = "dlia"
 @task("vacancy_geocode", phase=2, description="Geocode all the vacancy rows (using dressy for caching)")
 def run(source: Engine, target: Engine) -> TaskResult:
     q = """SELECT * FROM dlia.vericast;"""
+    chunksize = 5000
 
+    with source.connect() as conn:
+        total_rows = conn.execute(text("SELECT COUNT(*) FROM dlia.vericast")).scalar()
 
     with Dressy() as d: # Automatically connects to the db in .env
         print("Dressy was initialized")
@@ -22,7 +25,8 @@ def run(source: Engine, target: Engine) -> TaskResult:
         # Chunked iteration
         if_exists="replace"
         rows_inserted = 0
-        for chunk in tqdm(pd.read_sql(q, source, chunksize=5000)):
+        total_chunks = (total_rows + chunksize - 1) // chunksize
+        for chunk in tqdm(pd.read_sql(q, source, chunksize=chunksize), total=total_chunks):
             
             # Remove po boxes
             chunk = chunk[chunk["street_name"].str.strip() != "PO BOX"].copy()
