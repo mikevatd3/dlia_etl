@@ -1,5 +1,6 @@
 from tqdm import tqdm
 from sqlalchemy import Engine
+import pandas as pd
 
 from dlia_etl.registry import task, TaskResult
 
@@ -17,39 +18,38 @@ def run(source: Engine, target: Engine) -> TaskResult:
 
     with Dressy() as d: # Automatically connects to the db in .env
         print("Dressy was initialized")
-        # zip_code,
-        # street_num,
-        # street_pre_directional,
-        # street_name,
-        # street_post_directional,
-        # street_suffix,
-        # city_name,
-        # state_code,
 
         # Chunked iteration
         if_exists="replace"
         rows_inserted = 0
-        for chunk in tqdm(d.geocode_sql(
-            q,
-            con=source,
-            chunksize=5,
-            column=None,
-            columns={
-                "house_number": "HOUSE_NO",
-                "street_name":  "STREET",
-                "street_type":  "ST_TYPE",
-                "city":         "CITY",
-                "state":        "STATE",
-                "zip_code":     "ZIP",
-            }
-        )):
+        for chunk in tqdm(pd.read_sql(q, source, chunksize=5000)):
+            
+            # Remove po boxes
+            chunk = chunk[chunk["street_name"].str.strip() != "PO BOX"].copy()
+            chunk["full_street"] = (
+                chunk["street_pre_directional"] 
+                + chunk["street_name"] 
+                + chunk["street_post_directional"]
+            )
 
-            print("A chunk was processed, pushing to db.")
-            chunk.to_sql(
+            gced = d.geocode_df(
+                chunk,
+                column=None,
+                columns={
+                    "house_number": "street_num",
+                    "street_name":  "full_street",
+                    "street_type":  "street_suffix",
+                    "city":         "city_name",
+                    "state":        "state_code",
+                    "zip_code":     "zip_code",
+                }
+            )
+
+            gced.to_sql(
                 WRITE_TABLE, target, schema=WRITE_SCHEMA, index=False,
                 if_exists=if_exists
             )
-            rows_inserted += len(chunk)
+            rows_inserted += len(gced)
             if_exists="append"
 
         return TaskResult(task_name="vacancy_geocode", rows_inserted=rows_inserted, success=True)
