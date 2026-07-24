@@ -20,8 +20,34 @@ def count_remaining(
     source_schema: str = "dlia",
     target_schema: str = "dlia",
     distinct: bool = False,
+    estimate: bool = False,
 ) -> int:
-    """Count how many source rows have not yet been written to the target."""
+    """Count how many source rows have not yet been written to the target.
+
+    When ``estimate=True``, uses pg_class approximate row counts for the
+    source table (instant) and an exact count for the smaller target table.
+    Good enough for tqdm totals on large, stable tables.
+    """
+    if estimate:
+        with source_engine.connect() as conn:
+            source_count = conn.execute(text(
+                "SELECT reltuples::bigint FROM pg_class "
+                "WHERE oid = :tbl::regclass"
+            ), {"tbl": f"{source_schema}.{source_table}"}).scalar() or 0
+
+        with target_engine.connect() as conn:
+            target_exists = conn.execute(text(
+                "SELECT to_regclass(:tbl)"
+            ), {"tbl": f"{target_schema}.{target_table}"}).scalar()
+            if target_exists:
+                target_count = conn.execute(text(
+                    f"SELECT COUNT(*) FROM {target_schema}.{target_table}"
+                )).scalar()
+            else:
+                target_count = 0
+
+        return max(0, source_count - target_count)
+
     join_clause = " AND ".join(f"s.{k} = t.{k}" for k in join_keys)
     null_check = f"t.{join_keys[0]} IS NULL"
 
@@ -86,6 +112,9 @@ def resumable_chunks(
         exists = conn.execute(text(
             "SELECT to_regclass(:tbl)",
         ), {"tbl": f"{target_schema}.{target_table}"}).scalar()
+
+    # Index source join keys for DISTINCT ON performance
+    _ensure_index(source_engine, source_table, source_schema, join_keys)
 
     if exists:
         _ensure_index(target_engine, target_table, target_schema, join_keys)

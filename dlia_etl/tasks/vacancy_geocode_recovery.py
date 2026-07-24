@@ -34,7 +34,7 @@ def run(source: Engine, target: Engine) -> TaskResult:
     remaining = count_remaining(
         source, "vericast", target, WRITE_TABLE, JOIN_KEYS,
         source_schema=WRITE_SCHEMA, target_schema=WRITE_SCHEMA,
-        distinct=True,
+        estimate=True,
     )
     total_chunks = (remaining + chunksize - 1) // chunksize
 
@@ -53,6 +53,8 @@ def run(source: Engine, target: Engine) -> TaskResult:
         )
         for chunk in tqdm(chunks, total=total_chunks):
             chunk = chunk[chunk["street_name"].str.strip() != "PO BOX"].copy()
+            if chunk.empty:
+                continue
             chunk["full_street"] = (
                 chunk["street_pre_directional"].fillna("")
                 + chunk["street_name"].fillna("")
