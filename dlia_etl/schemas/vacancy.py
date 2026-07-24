@@ -55,3 +55,14 @@ class VacancyModel(pa.DataFrameModel):
 
     class Config:
         coerce = True
+
+
+class VacancyGeocodeModel(pa.DataFrameModel):
+    valassis_key: int
+    latitude: float = pa.Field(nullable=True)
+    longitude: float = pa.Field(nullable=True)
+    geocode_method: str = pa.Field(nullable=True)
+    confidence: float = pa.Field(nullable=True)
+
+    class Config:
+        coerce = True
