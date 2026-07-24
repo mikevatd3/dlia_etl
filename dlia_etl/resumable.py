@@ -19,13 +19,19 @@ def count_remaining(
     join_keys: list[str],
     source_schema: str = "dlia",
     target_schema: str = "dlia",
+    distinct: bool = False,
 ) -> int:
     """Count how many source rows have not yet been written to the target."""
     join_clause = " AND ".join(f"s.{k} = t.{k}" for k in join_keys)
     null_check = f"t.{join_keys[0]} IS NULL"
 
+    if distinct:
+        count_expr = f"COUNT(DISTINCT s.{join_keys[0]})"
+    else:
+        count_expr = "COUNT(*)"
+
     query = f"""
-        SELECT COUNT(*)
+        SELECT {count_expr}
         FROM {source_schema}.{source_table} s
         LEFT JOIN {target_schema}.{target_table} t
           ON {join_clause}
@@ -56,6 +62,7 @@ def resumable_chunks(
     chunksize: int = 5000,
     source_schema: str = "dlia",
     target_schema: str = "dlia",
+    distinct: bool = False,
 ) -> Iterator[pd.DataFrame]:
     """Yield chunks of unprocessed rows from the source table.
 
@@ -63,8 +70,17 @@ def resumable_chunks(
     cursor for memory-efficient streaming. Safe to restart after crashes:
     already-written rows are excluded by the join.
 
-    Requires that ``join_keys`` form a unique key in both tables.
+    When ``distinct=True``, deduplicates source rows by ``join_keys``
+    using ``DISTINCT ON``, so each key is yielded only once even if it
+    appears in multiple source rows.
+
+    Requires that ``join_keys`` form a unique key in the target table.
     """
+    distinct_clause = ""
+    if distinct:
+        distinct_cols = ", ".join(join_keys)
+        distinct_clause = f"DISTINCT ON ({distinct_cols}) "
+
     # Ensure target table exists before querying it
     with target_engine.connect() as conn:
         exists = conn.execute(text(
@@ -78,7 +94,7 @@ def resumable_chunks(
         null_check = f"t.{join_keys[0]} IS NULL"
 
         query = f"""
-            SELECT s.*
+            SELECT {distinct_clause}s.*
             FROM {source_schema}.{source_table} s
             LEFT JOIN {target_schema}.{target_table} t
               ON {join_clause}
@@ -86,7 +102,7 @@ def resumable_chunks(
         """
     else:
         # Target doesn't exist yet — return all source rows
-        query = f"SELECT * FROM {source_schema}.{source_table}"
+        query = f"SELECT {distinct_clause}* FROM {source_schema}.{source_table}"
 
     with source_engine.connect().execution_options(stream_results=True) as conn:
         for chunk in pd.read_sql(text(query), conn, chunksize=chunksize):

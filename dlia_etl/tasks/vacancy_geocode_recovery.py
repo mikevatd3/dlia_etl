@@ -15,7 +15,7 @@ logger = logging.getLogger(__name__)
 
 WRITE_TABLE = "vericast_geocode"
 WRITE_SCHEMA = "dlia"
-JOIN_KEYS = ["valassis_key", "start_date", "end_date"]
+JOIN_KEYS = ["valassis_key"]
 
 
 @task("vacancy_geocode_recovery", phase=2,
@@ -34,6 +34,7 @@ def run(source: Engine, target: Engine) -> TaskResult:
     remaining = count_remaining(
         source, "vericast", target, WRITE_TABLE, JOIN_KEYS,
         source_schema=WRITE_SCHEMA, target_schema=WRITE_SCHEMA,
+        distinct=True,
     )
     total_chunks = (remaining + chunksize - 1) // chunksize
 
@@ -48,6 +49,7 @@ def run(source: Engine, target: Engine) -> TaskResult:
             chunksize=chunksize,
             source_schema=WRITE_SCHEMA,
             target_schema=WRITE_SCHEMA,
+            distinct=True,
         )
         for chunk in tqdm(chunks, total=total_chunks):
             chunk = chunk[chunk["street_name"].str.strip() != "PO BOX"].copy()
@@ -73,8 +75,6 @@ def run(source: Engine, target: Engine) -> TaskResult:
 
             gced = gced[[
                 "valassis_key",
-                "start_date",
-                "end_date",
                 "latitude",
                 "longitude",
                 "geocode_method",

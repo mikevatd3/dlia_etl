@@ -11,7 +11,7 @@ from dressy import Dressy
 
 WRITE_TABLE = "vericast_geocode"
 WRITE_SCHEMA = "dlia"
-JOIN_KEYS = ["valassis_key", "start_date", "end_date"]
+JOIN_KEYS = ["valassis_key"]
 
 
 @task("vacancy_geocode", phase=2, description="Geocode all the vacancy rows (using dressy for caching)")
@@ -21,6 +21,7 @@ def run(source: Engine, target: Engine) -> TaskResult:
     remaining = count_remaining(
         source, "vericast", target, WRITE_TABLE, JOIN_KEYS,
         source_schema=WRITE_SCHEMA, target_schema=WRITE_SCHEMA,
+        distinct=True,
     )
     total_chunks = (remaining + chunksize - 1) // chunksize
 
@@ -35,6 +36,7 @@ def run(source: Engine, target: Engine) -> TaskResult:
             chunksize=chunksize,
             source_schema=WRITE_SCHEMA,
             target_schema=WRITE_SCHEMA,
+            distinct=True,
         )
         for chunk in tqdm(chunks, total=total_chunks):
             # Remove po boxes
@@ -60,8 +62,6 @@ def run(source: Engine, target: Engine) -> TaskResult:
 
             gced = gced[[
                 "valassis_key",
-                "start_date",
-                "end_date",
                 "latitude",
                 "longitude",
                 "geocode_method",
