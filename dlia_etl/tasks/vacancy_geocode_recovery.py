@@ -6,6 +6,7 @@ import pandas as pd
 
 from dlia_etl.registry import task, TaskResult
 from dlia_etl.resumable import resumable_chunks, count_remaining
+from dlia_etl.schemas.vacancy import VacancyGeocodeModel
 
 from dressy import Dressy
 
@@ -51,9 +52,9 @@ def run(source: Engine, target: Engine) -> TaskResult:
         for chunk in tqdm(chunks, total=total_chunks):
             chunk = chunk[chunk["street_name"].str.strip() != "PO BOX"].copy()
             chunk["full_street"] = (
-                chunk["street_pre_directional"]
-                + chunk["street_name"]
-                + chunk["street_post_directional"]
+                chunk["street_pre_directional"].fillna("")
+                + chunk["street_name"].fillna("")
+                + chunk["street_post_directional"].fillna("")
             )
 
             gced = d.geocode_df(
@@ -70,7 +71,19 @@ def run(source: Engine, target: Engine) -> TaskResult:
                 cache_only=True,
             )
 
-            gced.to_sql(
+            gced = gced[[
+                "valassis_key",
+                "start_date",
+                "end_date",
+                "latitude",
+                "longitude",
+                "geocode_method",
+                "confidence",
+            ]]
+
+            validated = VacancyGeocodeModel.validate(gced)
+
+            validated.to_sql(
                 WRITE_TABLE, target, schema=WRITE_SCHEMA, index=False,
                 if_exists="append"
             )
