@@ -32,7 +32,7 @@ def count_remaining(
         with source_engine.connect() as conn:
             source_count = conn.execute(text(
                 "SELECT reltuples::bigint FROM pg_class "
-                "WHERE oid = :tbl::regclass"
+                "WHERE oid = CAST(:tbl AS regclass)"
             ), {"tbl": f"{source_schema}.{source_table}"}).scalar() or 0
 
         with target_engine.connect() as conn:
