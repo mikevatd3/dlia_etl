@@ -50,6 +50,7 @@ def run(source: Engine, target: Engine) -> TaskResult:
             source_schema=WRITE_SCHEMA,
             target_schema=WRITE_SCHEMA,
             distinct=True,
+            stream=False,
         )
         for chunk in tqdm(chunks, total=total_chunks):
             chunk = chunk[chunk["street_name"].str.strip() != "PO BOX"].copy()

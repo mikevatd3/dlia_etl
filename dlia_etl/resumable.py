@@ -89,12 +89,17 @@ def resumable_chunks(
     source_schema: str = "dlia",
     target_schema: str = "dlia",
     distinct: bool = False,
+    stream: bool = True,
 ) -> Iterator[pd.DataFrame]:
     """Yield chunks of unprocessed rows from the source table.
 
-    Uses a LEFT ANTI-JOIN against the target table with a server-side
-    cursor for memory-efficient streaming. Safe to restart after crashes:
-    already-written rows are excluded by the join.
+    Uses a LEFT ANTI-JOIN against the target table. Safe to restart after
+    crashes: already-written rows are excluded by the join.
+
+    When ``stream=True`` (default), uses a server-side cursor for
+    memory-efficient streaming. When ``stream=False``, uses repeated
+    LIMIT queries — each query is independent and releases resources
+    between chunks, which avoids memory pressure on the server.
 
     When ``distinct=True``, deduplicates source rows by ``join_keys``
     using ``DISTINCT ON``, so each key is yielded only once even if it
@@ -119,20 +124,50 @@ def resumable_chunks(
     if exists:
         _ensure_index(target_engine, target_table, target_schema, join_keys)
 
+    if stream:
+        query = _build_query(
+            source_schema, source_table, target_schema, target_table,
+            join_keys, distinct_clause, exists,
+        )
+        with source_engine.connect().execution_options(stream_results=True) as conn:
+            for chunk in pd.read_sql(text(query), conn, chunksize=chunksize):
+                yield chunk
+    else:
+        while True:
+            query = _build_query(
+                source_schema, source_table, target_schema, target_table,
+                join_keys, distinct_clause, exists,
+                limit=chunksize,
+            )
+            with source_engine.connect() as conn:
+                chunk = pd.read_sql(text(query), conn)
+            if chunk.empty:
+                break
+            yield chunk
+
+
+def _build_query(
+    source_schema: str,
+    source_table: str,
+    target_schema: str,
+    target_table: str,
+    join_keys: list[str],
+    distinct_clause: str,
+    target_exists: bool,
+    limit: int | None = None,
+) -> str:
+    """Build the anti-join SELECT query."""
+    limit_clause = f" LIMIT {limit}" if limit else ""
+
+    if target_exists:
         join_clause = " AND ".join(f"s.{k} = t.{k}" for k in join_keys)
         null_check = f"t.{join_keys[0]} IS NULL"
-
-        query = f"""
+        return f"""
             SELECT {distinct_clause}s.*
             FROM {source_schema}.{source_table} s
             LEFT JOIN {target_schema}.{target_table} t
               ON {join_clause}
-            WHERE {null_check}
+            WHERE {null_check}{limit_clause}
         """
     else:
-        # Target doesn't exist yet — return all source rows
-        query = f"SELECT {distinct_clause}* FROM {source_schema}.{source_table}"
-
-    with source_engine.connect().execution_options(stream_results=True) as conn:
-        for chunk in pd.read_sql(text(query), conn, chunksize=chunksize):
-            yield chunk
+        return f"SELECT {distinct_clause}* FROM {source_schema}.{source_table}{limit_clause}"
