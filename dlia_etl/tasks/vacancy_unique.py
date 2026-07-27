@@ -33,8 +33,23 @@ def run(source: Engine, target: Engine) -> TaskResult:
     rows_inserted = 0
     if_exists = "replace"
 
+    # Estimate distinct valassis_key count for tqdm
+    with source.connect() as conn:
+        row = conn.execute(text(
+            "SELECT n_distinct, reltuples::bigint "
+            "FROM pg_stats s JOIN pg_class c ON c.relname = s.tablename "
+            "WHERE s.schemaname = 'dlia' AND s.tablename = 'vericast' "
+            "AND s.attname = 'valassis_key'"
+        )).first()
+    if row and row[0] and row[1]:
+        # n_distinct > 0 means exact count, < 0 means fraction of rows
+        n_distinct = int(row[0] * -row[1]) if row[0] < 0 else int(row[0])
+        total_chunks = (n_distinct + chunksize - 1) // chunksize
+    else:
+        total_chunks = None
+
     with source.connect().execution_options(stream_results=True) as conn:
-        for chunk in tqdm(pd.read_sql(text(q), conn, chunksize=chunksize)):
+        for chunk in tqdm(pd.read_sql(text(q), conn, chunksize=chunksize), total=total_chunks):
             chunk.to_sql(
                 TABLE_NAME, target, schema=OUT_SCHEMA,
                 index=False, if_exists=if_exists,
