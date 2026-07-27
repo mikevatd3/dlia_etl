@@ -75,4 +75,26 @@ def run(source: Engine, target: Engine) -> TaskResult:
             )
             rows_inserted += len(gced)
 
+    _build_geom(target)
+
     return TaskResult(task_name="vacancy_geocode", rows_inserted=rows_inserted, success=True)
+
+
+def _build_geom(engine: Engine):
+    """Add and populate a PostGIS geometry column from lat/lon."""
+    with engine.begin() as conn:
+        conn.execute(text(f"""
+            ALTER TABLE {WRITE_SCHEMA}.{WRITE_TABLE}
+            ADD COLUMN IF NOT EXISTS geom geometry(Point, 4326)
+        """))
+        conn.execute(text(f"""
+            UPDATE {WRITE_SCHEMA}.{WRITE_TABLE}
+            SET geom = ST_SetSRID(ST_MakePoint(longitude, latitude), 4326)
+            WHERE latitude IS NOT NULL
+              AND longitude IS NOT NULL
+              AND geom IS NULL
+        """))
+        conn.execute(text(f"""
+            CREATE INDEX IF NOT EXISTS idx_{WRITE_TABLE}_geom
+            ON {WRITE_SCHEMA}.{WRITE_TABLE} USING GIST (geom)
+        """))

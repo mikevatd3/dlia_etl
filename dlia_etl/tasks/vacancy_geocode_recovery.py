@@ -9,6 +9,7 @@ from dlia_etl.resumable import resumable_chunks, count_remaining
 from dlia_etl.schemas.vacancy import VacancyGeocodeModel
 
 from dressy import Dressy
+from dlia_etl.tasks.vacancy_geocode import _build_geom
 
 
 logger = logging.getLogger(__name__)
@@ -88,5 +89,7 @@ def run(source: Engine, target: Engine) -> TaskResult:
                 if_exists="append"
             )
             rows_inserted += len(gced)
+
+    _build_geom(target)
 
     return TaskResult(task_name="vacancy_geocode_recovery", rows_inserted=rows_inserted, success=True)
