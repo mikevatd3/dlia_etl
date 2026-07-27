@@ -13,6 +13,7 @@ SOURCE_TABLE = "vericast_unique"
 WRITE_TABLE = "vericast_geocode"
 WRITE_SCHEMA = "dlia"
 JOIN_KEYS = ["valassis_key"]
+PO_BOX_FILTER = "TRIM(s.street_name) != 'PO BOX'"
 
 
 @task("vacancy_geocode", phase=2, description="Geocode all the vacancy rows (using dressy for caching)")
@@ -22,7 +23,6 @@ def run(source: Engine, target: Engine) -> TaskResult:
     remaining = count_remaining(
         source, SOURCE_TABLE, target, WRITE_TABLE, JOIN_KEYS,
         source_schema=WRITE_SCHEMA, target_schema=WRITE_SCHEMA,
-        estimate=True,
     )
     total_chunks = (remaining + chunksize - 1) // chunksize
 
@@ -37,12 +37,9 @@ def run(source: Engine, target: Engine) -> TaskResult:
             chunksize=chunksize,
             source_schema=WRITE_SCHEMA,
             target_schema=WRITE_SCHEMA,
+            where=PO_BOX_FILTER,
         )
         for chunk in tqdm(chunks, total=total_chunks):
-            # Remove po boxes
-            chunk = chunk[chunk["street_name"].str.strip() != "PO BOX"].copy()
-            if chunk.empty:
-                continue
             chunk["full_street"] = (
                 chunk["street_pre_directional"].fillna("")
                 + chunk["street_name"].fillna("")

@@ -84,6 +84,7 @@ def resumable_chunks(
     target_schema: str = "dlia",
     deduplicate: bool = False,
     stream: bool = True,
+    where: str | None = None,
 ) -> Iterator[pd.DataFrame]:
     """Yield chunks of unprocessed rows from the source table.
 
@@ -115,7 +116,7 @@ def resumable_chunks(
     if stream:
         query = _build_query(
             source_schema, source_table, target_schema, target_table,
-            join_keys, exists,
+            join_keys, exists, where=where,
         )
         with source_engine.connect().execution_options(stream_results=True) as conn:
             for chunk in pd.read_sql(text(query), conn, chunksize=chunksize):
@@ -127,7 +128,7 @@ def resumable_chunks(
         while True:
             query = _build_query(
                 source_schema, source_table, target_schema, target_table,
-                join_keys, exists, limit=chunksize,
+                join_keys, exists, limit=chunksize, where=where,
             )
             with source_engine.connect() as conn:
                 chunk = pd.read_sql(text(query), conn)
@@ -147,9 +148,11 @@ def _build_query(
     join_keys: list[str],
     target_exists: bool,
     limit: int | None = None,
+    where: str | None = None,
 ) -> str:
     """Build the anti-join SELECT query."""
     limit_clause = f" LIMIT {limit}" if limit else ""
+    extra_where = f" AND {where}" if where else ""
 
     if target_exists:
         join_clause = " AND ".join(f"s.{k} = t.{k}" for k in join_keys)
@@ -159,7 +162,9 @@ def _build_query(
             FROM {source_schema}.{source_table} s
             LEFT JOIN {target_schema}.{target_table} t
               ON {join_clause}
-            WHERE {null_check}{limit_clause}
+            WHERE {null_check}{extra_where}{limit_clause}
         """
     else:
+        if where:
+            return f"SELECT * FROM {source_schema}.{source_table} WHERE {where}{limit_clause}"
         return f"SELECT * FROM {source_schema}.{source_table}{limit_clause}"
