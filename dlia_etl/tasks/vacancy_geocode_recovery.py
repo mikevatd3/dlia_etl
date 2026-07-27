@@ -13,6 +13,7 @@ from dressy import Dressy
 
 logger = logging.getLogger(__name__)
 
+SOURCE_TABLE = "vericast_unique"
 WRITE_TABLE = "vericast_geocode"
 WRITE_SCHEMA = "dlia"
 JOIN_KEYS = ["valassis_key"]
@@ -30,9 +31,8 @@ def run(source: Engine, target: Engine) -> TaskResult:
         )).rowcount
     logger.info("Deleted %d unresolved rows from %s.%s", deleted, WRITE_SCHEMA, WRITE_TABLE)
 
-    # Now use resumable_chunks to re-read those source rows
     remaining = count_remaining(
-        source, "vericast", target, WRITE_TABLE, JOIN_KEYS,
+        source, SOURCE_TABLE, target, WRITE_TABLE, JOIN_KEYS,
         source_schema=WRITE_SCHEMA, target_schema=WRITE_SCHEMA,
         estimate=True,
     )
@@ -42,14 +42,13 @@ def run(source: Engine, target: Engine) -> TaskResult:
         rows_inserted = 0
         chunks = resumable_chunks(
             source_engine=source,
-            source_table="vericast",
+            source_table=SOURCE_TABLE,
             target_engine=target,
             target_table=WRITE_TABLE,
             join_keys=JOIN_KEYS,
             chunksize=chunksize,
             source_schema=WRITE_SCHEMA,
             target_schema=WRITE_SCHEMA,
-            distinct=True,
             stream=False,
         )
         for chunk in tqdm(chunks, total=total_chunks):

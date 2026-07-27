@@ -19,7 +19,6 @@ def count_remaining(
     join_keys: list[str],
     source_schema: str = "dlia",
     target_schema: str = "dlia",
-    distinct: bool = False,
     estimate: bool = False,
 ) -> int:
     """Count how many source rows have not yet been written to the target.
@@ -51,13 +50,8 @@ def count_remaining(
     join_clause = " AND ".join(f"s.{k} = t.{k}" for k in join_keys)
     null_check = f"t.{join_keys[0]} IS NULL"
 
-    if distinct:
-        count_expr = f"COUNT(DISTINCT s.{join_keys[0]})"
-    else:
-        count_expr = "COUNT(*)"
-
     query = f"""
-        SELECT {count_expr}
+        SELECT COUNT(*)
         FROM {source_schema}.{source_table} s
         LEFT JOIN {target_schema}.{target_table} t
           ON {join_clause}
@@ -88,7 +82,7 @@ def resumable_chunks(
     chunksize: int = 5000,
     source_schema: str = "dlia",
     target_schema: str = "dlia",
-    distinct: bool = False,
+    deduplicate: bool = False,
     stream: bool = True,
 ) -> Iterator[pd.DataFrame]:
     """Yield chunks of unprocessed rows from the source table.
@@ -99,26 +93,20 @@ def resumable_chunks(
     When ``stream=True`` (default), uses a server-side cursor for
     memory-efficient streaming. When ``stream=False``, uses repeated
     LIMIT queries — each query is independent and releases resources
-    between chunks, which avoids memory pressure on the server.
+    between chunks.
 
-    When ``distinct=True``, deduplicates source rows by ``join_keys``
-    using ``DISTINCT ON``, so each key is yielded only once even if it
-    appears in multiple source rows.
+    When ``deduplicate=True``, drops duplicate join keys within each
+    chunk in Python. Cross-chunk duplicates are handled naturally by
+    the anti-join (once a key is written, subsequent rows are excluded).
 
     Requires that ``join_keys`` form a unique key in the target table.
     """
-    distinct_clause = ""
-    if distinct:
-        distinct_cols = ", ".join(join_keys)
-        distinct_clause = f"DISTINCT ON ({distinct_cols}) "
-
     # Ensure target table exists before querying it
     with target_engine.connect() as conn:
         exists = conn.execute(text(
             "SELECT to_regclass(:tbl)",
         ), {"tbl": f"{target_schema}.{target_table}"}).scalar()
 
-    # Index source join keys for DISTINCT ON performance
     _ensure_index(source_engine, source_table, source_schema, join_keys)
 
     if exists:
@@ -127,23 +115,28 @@ def resumable_chunks(
     if stream:
         query = _build_query(
             source_schema, source_table, target_schema, target_table,
-            join_keys, distinct_clause, exists,
+            join_keys, exists,
         )
         with source_engine.connect().execution_options(stream_results=True) as conn:
             for chunk in pd.read_sql(text(query), conn, chunksize=chunksize):
-                yield chunk
+                if deduplicate:
+                    chunk = chunk.drop_duplicates(subset=join_keys, keep="first")
+                if not chunk.empty:
+                    yield chunk
     else:
         while True:
             query = _build_query(
                 source_schema, source_table, target_schema, target_table,
-                join_keys, distinct_clause, exists,
-                limit=chunksize,
+                join_keys, exists, limit=chunksize,
             )
             with source_engine.connect() as conn:
                 chunk = pd.read_sql(text(query), conn)
             if chunk.empty:
                 break
-            yield chunk
+            if deduplicate:
+                chunk = chunk.drop_duplicates(subset=join_keys, keep="first")
+            if not chunk.empty:
+                yield chunk
 
 
 def _build_query(
@@ -152,7 +145,6 @@ def _build_query(
     target_schema: str,
     target_table: str,
     join_keys: list[str],
-    distinct_clause: str,
     target_exists: bool,
     limit: int | None = None,
 ) -> str:
@@ -163,11 +155,11 @@ def _build_query(
         join_clause = " AND ".join(f"s.{k} = t.{k}" for k in join_keys)
         null_check = f"t.{join_keys[0]} IS NULL"
         return f"""
-            SELECT {distinct_clause}s.*
+            SELECT s.*
             FROM {source_schema}.{source_table} s
             LEFT JOIN {target_schema}.{target_table} t
               ON {join_clause}
             WHERE {null_check}{limit_clause}
         """
     else:
-        return f"SELECT {distinct_clause}* FROM {source_schema}.{source_table}{limit_clause}"
+        return f"SELECT * FROM {source_schema}.{source_table}{limit_clause}"
