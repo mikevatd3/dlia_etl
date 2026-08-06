@@ -85,6 +85,7 @@ def run(source: Engine, target: Engine) -> TaskResult:
             COALESCE(street_suffix, '') AS raw_address
         FROM {OUT_SCHEMA}.vericast_unique
         WHERE TRIM(street_name) != 'PO BOX'
+          AND UPPER(TRIM(city_name)) = 'DETROIT'
     """
 
     with source.connect().execution_options(stream_results=True) as conn:
