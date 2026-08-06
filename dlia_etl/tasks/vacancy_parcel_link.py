@@ -1,15 +1,12 @@
 import logging
-import os
-import subprocess
-import time
 
-import requests
 from tqdm import tqdm
 from sqlalchemy import Engine, text
 import pandas as pd
 
 from dlia_etl.registry import task, TaskResult
 from dlia_etl.config import OUT_SCHEMA, PARCEL_TABLE
+from dressy.standardize import standardize_batch
 
 logger = logging.getLogger(__name__)
 
@@ -17,70 +14,33 @@ WRITE_TABLE = "vacancy_parcel_link"
 VERICAST_NORM = "tmp_vericast_normalized"
 PARCELS_NORM = "tmp_parcels_normalized"
 
-POSTAL_PORT = 8400
-POSTAL_URL = f"http://localhost:{POSTAL_PORT}"
-
-
-def _start_postal_service():
-    """Start the postal service if it isn't already running."""
-    try:
-        requests.get(f"{POSTAL_URL}/docs", timeout=2)
-        logger.info("Postal service already running on port %d", POSTAL_PORT)
-        return None
-    except requests.ConnectionError:
-        pass
-
-    logger.info("Starting postal service on port %d...", POSTAL_PORT)
-    proc = subprocess.Popen(
-        ["uv", "run", "uvicorn", "dressy.postal_service:app",
-         "--host", "0.0.0.0", "--port", str(POSTAL_PORT)],
-        cwd=os.path.expanduser("~/0_projects/dressy"),
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-    )
-
-    # Wait for it to be ready
-    for _ in range(30):
-        try:
-            requests.get(f"{POSTAL_URL}/docs", timeout=1)
-            logger.info("Postal service started (pid %d)", proc.pid)
-            return proc
-        except requests.ConnectionError:
-            time.sleep(1)
-
-    proc.kill()
-    raise RuntimeError("Postal service failed to start within 30 seconds")
-
-
-def _stop_postal_service(proc):
-    """Stop the postal service if we started it."""
-    if proc is not None:
-        proc.terminate()
-        proc.wait(timeout=5)
-        logger.info("Postal service stopped")
-
 
 def _normalize_chunk(df: pd.DataFrame, address_col: str, id_col: str) -> pd.DataFrame:
-    """Normalize a chunk of addresses through Dressy's standardize."""
-    # Import here so POSTAL_SERVICE_URL is set before dressy reads it
-    from dressy.standardize import standardize
+    """Normalize a chunk of addresses through Dressy's batch standardize."""
+    raw_addresses = df[address_col].astype(str).str.strip().tolist()
+    ids = df[id_col].tolist()
+
+    # Filter blanks but keep index alignment
+    valid = [(i, raw) for i, raw in zip(ids, raw_addresses) if raw]
+    if not valid:
+        return pd.DataFrame(columns=["id", "normalized_house_number", "normalized_street_name", "normalized_street_type"])
+
+    valid_ids, valid_raws = zip(*valid)
+
+    try:
+        results = standardize_batch(list(valid_raws))
+    except Exception as e:
+        logger.error("Batch standardize failed: %s", e)
+        return pd.DataFrame(columns=["id", "normalized_house_number", "normalized_street_name", "normalized_street_type"])
 
     rows = []
-    for _, row in df.iterrows():
-        raw = str(row[address_col]).strip()
-        if not raw:
-            continue
-        try:
-            parsed, _ = standardize(raw)
-            rows.append({
-                "id": row[id_col],
-                "normalized_house_number": parsed.house_number,
-                "normalized_street_name": parsed.street_name,
-                "normalized_street_type": parsed.street_type,
-            })
-        except Exception as e:
-            logger.debug("Failed to standardize '%s': %s", raw, e)
-            continue
+    for id_val, (_, parsed, _) in zip(valid_ids, results):
+        rows.append({
+            "id": id_val,
+            "normalized_house_number": parsed.house_number,
+            "normalized_street_name": parsed.street_name,
+            "normalized_street_type": parsed.street_type,
+        })
 
     if not rows:
         return pd.DataFrame(columns=["id", "normalized_house_number", "normalized_street_name", "normalized_street_type"])
@@ -92,17 +52,6 @@ def _normalize_chunk(df: pd.DataFrame, address_col: str, id_col: str) -> pd.Data
 def run(source: Engine, target: Engine) -> TaskResult:
     chunksize = 10_000
 
-    # Ensure postal service is available
-    os.environ.setdefault("POSTAL_SERVICE_URL", POSTAL_URL)
-    postal_proc = _start_postal_service()
-
-    try:
-        return _run_matching(source, target, chunksize)
-    finally:
-        _stop_postal_service(postal_proc)
-
-
-def _run_matching(source: Engine, target: Engine, chunksize: int) -> TaskResult:
     # Step 1: Normalize vericast addresses
     logger.info("Step 1: Normalizing vericast addresses...")
 
