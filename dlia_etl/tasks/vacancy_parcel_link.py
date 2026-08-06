@@ -12,8 +12,8 @@ from dressy.standardize import standardize
 logger = logging.getLogger(__name__)
 
 WRITE_TABLE = "vacancy_parcel_link"
-VERICAST_NORM = "_vericast_normalized"
-PARCELS_NORM = "_parcels_normalized"
+VERICAST_NORM = "tmp_vericast_normalized"
+PARCELS_NORM = "tmp_parcels_normalized"
 
 
 def _normalize_df(df: pd.DataFrame, address_col: str, id_col: str) -> pd.DataFrame:
@@ -88,6 +88,7 @@ def run(source: Engine, target: Engine) -> TaskResult:
           AND UPPER(TRIM(city_name)) = 'DETROIT'
     """
 
+    vericast_if_exists = "replace"
     with source.connect().execution_options(stream_results=True) as conn:
         for chunk in tqdm(
             pd.read_sql(text(vericast_q), conn, chunksize=chunksize),
@@ -97,8 +98,9 @@ def run(source: Engine, target: Engine) -> TaskResult:
             if not normalized.empty:
                 normalized.to_sql(
                     VERICAST_NORM, target, schema=OUT_SCHEMA,
-                    index=False, if_exists="append",
+                    index=False, if_exists=vericast_if_exists,
                 )
+                vericast_if_exists = "append"
 
     with target.begin() as conn:
         conn.execute(text(
@@ -109,9 +111,6 @@ def run(source: Engine, target: Engine) -> TaskResult:
     # Step 2: Normalize parcel addresses
     logger.info("Step 2: Normalizing parcel addresses...")
 
-    with target.begin() as conn:
-        conn.execute(text(f"DROP TABLE IF EXISTS {OUT_SCHEMA}.{PARCELS_NORM}"))
-
     parcels_q = f"""
         SELECT parcel_id,
             COALESCE(street_number, '') || ' ' ||
@@ -120,6 +119,7 @@ def run(source: Engine, target: Engine) -> TaskResult:
         FROM {OUT_SCHEMA}.{PARCEL_TABLE}
     """
 
+    parcels_if_exists = "replace"
     with source.connect().execution_options(stream_results=True) as conn:
         for chunk in tqdm(
             pd.read_sql(text(parcels_q), conn, chunksize=chunksize),
@@ -129,8 +129,9 @@ def run(source: Engine, target: Engine) -> TaskResult:
             if not normalized.empty:
                 normalized.to_sql(
                     PARCELS_NORM, target, schema=OUT_SCHEMA,
-                    index=False, if_exists="append",
+                    index=False, if_exists=parcels_if_exists,
                 )
+                parcels_if_exists = "append"
 
     with target.begin() as conn:
         conn.execute(text(
