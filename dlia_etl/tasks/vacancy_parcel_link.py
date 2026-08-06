@@ -1,5 +1,9 @@
 import logging
+import os
+import subprocess
+import time
 
+import requests
 from tqdm import tqdm
 from sqlalchemy import Engine, text
 import pandas as pd
@@ -7,62 +11,79 @@ import pandas as pd
 from dlia_etl.registry import task, TaskResult
 from dlia_etl.config import OUT_SCHEMA, PARCEL_TABLE
 
-from dressy.standardize import standardize
-
 logger = logging.getLogger(__name__)
 
 WRITE_TABLE = "vacancy_parcel_link"
 VERICAST_NORM = "tmp_vericast_normalized"
 PARCELS_NORM = "tmp_parcels_normalized"
 
+POSTAL_PORT = 8400
+POSTAL_URL = f"http://localhost:{POSTAL_PORT}"
 
-def _normalize_df(df: pd.DataFrame, address_col: str, id_col: str) -> pd.DataFrame:
-    """Run addresses through libpostal standardize and return normalized components."""
+
+def _start_postal_service():
+    """Start the postal service if it isn't already running."""
+    try:
+        requests.get(f"{POSTAL_URL}/docs", timeout=2)
+        logger.info("Postal service already running on port %d", POSTAL_PORT)
+        return None
+    except requests.ConnectionError:
+        pass
+
+    logger.info("Starting postal service on port %d...", POSTAL_PORT)
+    proc = subprocess.Popen(
+        ["uv", "run", "uvicorn", "dressy.postal_service:app",
+         "--host", "0.0.0.0", "--port", str(POSTAL_PORT)],
+        cwd=os.path.expanduser("~/0_projects/dressy"),
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+
+    # Wait for it to be ready
+    for _ in range(30):
+        try:
+            requests.get(f"{POSTAL_URL}/docs", timeout=1)
+            logger.info("Postal service started (pid %d)", proc.pid)
+            return proc
+        except requests.ConnectionError:
+            time.sleep(1)
+
+    proc.kill()
+    raise RuntimeError("Postal service failed to start within 30 seconds")
+
+
+def _stop_postal_service(proc):
+    """Stop the postal service if we started it."""
+    if proc is not None:
+        proc.terminate()
+        proc.wait(timeout=5)
+        logger.info("Postal service stopped")
+
+
+def _normalize_chunk(df: pd.DataFrame, address_col: str, id_col: str) -> pd.DataFrame:
+    """Normalize a chunk of addresses through Dressy's standardize."""
+    # Import here so POSTAL_SERVICE_URL is set before dressy reads it
+    from dressy.standardize import standardize
+
     rows = []
     for _, row in df.iterrows():
         raw = str(row[address_col]).strip()
         if not raw:
             continue
         try:
-            parsed, key = standardize(raw)
+            parsed, _ = standardize(raw)
             rows.append({
                 "id": row[id_col],
                 "normalized_house_number": parsed.house_number,
                 "normalized_street_name": parsed.street_name,
                 "normalized_street_type": parsed.street_type,
             })
-        except Exception:
+        except Exception as e:
+            logger.debug("Failed to standardize '%s': %s", raw, e)
             continue
 
-    return pd.DataFrame(rows)
-
-
-def _normalize_df_batch(df: pd.DataFrame, address_col: str, id_col: str) -> pd.DataFrame:
-    """Batch-normalize addresses through libpostal standardize."""
-    ids = []
-    raw_addresses = []
-    for _, row in df.iterrows():
-        raw = str(row[address_col]).strip()
-        if raw:
-            ids.append(row[id_col])
-            raw_addresses.append(raw)
-
-    if not raw_addresses:
+    if not rows:
         return pd.DataFrame(columns=["id", "normalized_house_number", "normalized_street_name", "normalized_street_type"])
-
-    rows = []
-    for i, raw in enumerate(raw_addresses):
-        try:
-            parsed, _ = standardize(raw)
-            rows.append({
-                "id": ids[i],
-                "normalized_house_number": parsed.house_number,
-                "normalized_street_name": parsed.street_name,
-                "normalized_street_type": parsed.street_type,
-            })
-        except Exception:
-            continue
-
     return pd.DataFrame(rows)
 
 
@@ -71,11 +92,19 @@ def _normalize_df_batch(df: pd.DataFrame, address_col: str, id_col: str) -> pd.D
 def run(source: Engine, target: Engine) -> TaskResult:
     chunksize = 10_000
 
+    # Ensure postal service is available
+    os.environ.setdefault("POSTAL_SERVICE_URL", POSTAL_URL)
+    postal_proc = _start_postal_service()
+
+    try:
+        return _run_matching(source, target, chunksize)
+    finally:
+        _stop_postal_service(postal_proc)
+
+
+def _run_matching(source: Engine, target: Engine, chunksize: int) -> TaskResult:
     # Step 1: Normalize vericast addresses
     logger.info("Step 1: Normalizing vericast addresses...")
-
-    with target.begin() as conn:
-        conn.execute(text(f"DROP TABLE IF EXISTS {OUT_SCHEMA}.{VERICAST_NORM}"))
 
     vericast_q = f"""
         SELECT valassis_key,
@@ -94,7 +123,7 @@ def run(source: Engine, target: Engine) -> TaskResult:
             pd.read_sql(text(vericast_q), conn, chunksize=chunksize),
             desc="Normalizing vericast",
         ):
-            normalized = _normalize_df_batch(chunk, "raw_address", "valassis_key")
+            normalized = _normalize_chunk(chunk, "raw_address", "valassis_key")
             if not normalized.empty:
                 normalized.to_sql(
                     VERICAST_NORM, target, schema=OUT_SCHEMA,
@@ -125,7 +154,7 @@ def run(source: Engine, target: Engine) -> TaskResult:
             pd.read_sql(text(parcels_q), conn, chunksize=chunksize),
             desc="Normalizing parcels",
         ):
-            normalized = _normalize_df_batch(chunk, "raw_address", "parcel_id")
+            normalized = _normalize_chunk(chunk, "raw_address", "parcel_id")
             if not normalized.empty:
                 normalized.to_sql(
                     PARCELS_NORM, target, schema=OUT_SCHEMA,
