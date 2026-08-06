@@ -56,7 +56,6 @@ def _stop_postal_service(proc):
         proc.wait(timeout=5)
         logger.info("Postal service stopped")
 
->>>>>>> 73dad29 (made some kind of change idk)
 
 def _normalize_chunk(df: pd.DataFrame, address_col: str, id_col: str) -> pd.DataFrame:
     """Normalize a chunk of addresses through Dressy's batch standardize."""
