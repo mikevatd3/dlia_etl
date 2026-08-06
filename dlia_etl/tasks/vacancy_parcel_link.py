@@ -91,7 +91,7 @@ def run(source: Engine, target: Engine) -> TaskResult:
 
     parcels_q = f"""
         SELECT parcel_id,
-            COALESCE(street_number, '') || ' ' ||
+            COALESCE(street_number::text, '') || ' ' ||
             COALESCE(street_prefix, '') || ' ' ||
             COALESCE(street_name, '') AS raw_address
         FROM {IN_SCHEMA}.{PARCEL_TABLE}
