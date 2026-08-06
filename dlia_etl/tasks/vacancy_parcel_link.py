@@ -9,7 +9,7 @@ from sqlalchemy import Engine, text
 import pandas as pd
 
 from dlia_etl.registry import task, TaskResult
-from dlia_etl.config import OUT_SCHEMA, PARCEL_TABLE
+from dlia_etl.config import IN_SCHEMA, OUT_SCHEMA, PARCEL_TABLE
 
 logger = logging.getLogger(__name__)
 
@@ -145,7 +145,7 @@ def _run_matching(source: Engine, target: Engine, chunksize: int) -> TaskResult:
             COALESCE(street_number, '') || ' ' ||
             COALESCE(street_prefix, '') || ' ' ||
             COALESCE(street_name, '') AS raw_address
-        FROM {OUT_SCHEMA}.{PARCEL_TABLE}
+        FROM {IN_SCHEMA}.{PARCEL_TABLE}
     """
 
     parcels_if_exists = "replace"
