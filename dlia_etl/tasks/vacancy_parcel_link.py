@@ -14,6 +14,49 @@ WRITE_TABLE = "vacancy_parcel_link"
 VERICAST_NORM = "tmp_vericast_normalized"
 PARCELS_NORM = "tmp_parcels_normalized"
 
+POSTAL_PORT = 8400
+POSTAL_URL = f"http://localhost:{POSTAL_PORT}"
+
+
+def _start_postal_service():
+    """Start the postal service if it isn't already running."""
+    try:
+        requests.get(f"{POSTAL_URL}/docs", timeout=2)
+        logger.info("Postal service already running on port %d", POSTAL_PORT)
+        return None
+    except requests.ConnectionError:
+        pass
+
+    logger.info("Starting postal service on port %d...", POSTAL_PORT)
+    proc = subprocess.Popen(
+        ["uv", "run", "uvicorn", "dressy.postal_service:app",
+         "--host", "0.0.0.0", "--port", str(POSTAL_PORT)],
+        cwd=os.path.expanduser("~/2_responsibilities/dressy"),
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+
+    # Wait for it to be ready
+    for _ in range(30):
+        try:
+            requests.get(f"{POSTAL_URL}/docs", timeout=1)
+            logger.info("Postal service started (pid %d)", proc.pid)
+            return proc
+        except requests.ConnectionError:
+            time.sleep(1)
+
+    proc.kill()
+    raise RuntimeError("Postal service failed to start within 30 seconds")
+
+
+def _stop_postal_service(proc):
+    """Stop the postal service if we started it."""
+    if proc is not None:
+        proc.terminate()
+        proc.wait(timeout=5)
+        logger.info("Postal service stopped")
+
+>>>>>>> 73dad29 (made some kind of change idk)
 
 def _normalize_chunk(df: pd.DataFrame, address_col: str, id_col: str) -> pd.DataFrame:
     """Normalize a chunk of addresses through Dressy's batch standardize."""
