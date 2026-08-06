@@ -14,3 +14,5 @@ SOURCE_DIR = Path(__file__).parent / "sources"
 FIELD_REFERENCE_DIR = Path(__file__).parent / "field_references"
 OUT_SCHEMA = "dlia"  # Detroit Land Information Archive
 
+PARCEL_TABLE = "parcels"  # Change this when the parcel source table changes
+
