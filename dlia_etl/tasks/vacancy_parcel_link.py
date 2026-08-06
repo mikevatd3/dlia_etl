@@ -160,60 +160,89 @@ def run(source: Engine, target: Engine) -> TaskResult:
             f"ON {OUT_SCHEMA}.{PARCELS_NORM} (normalized_house_number, normalized_street_name)"
         ))
 
-    # Step 3: Exact match on normalized components
-    logger.info("Step 3: Exact matching on normalized addresses...")
-
-    with target.begin() as conn:
-        conn.execute(text(f"DROP TABLE IF EXISTS {OUT_SCHEMA}.{WRITE_TABLE}"))
-        conn.execute(text(f"""
-            CREATE TABLE {OUT_SCHEMA}.{WRITE_TABLE} AS
-            SELECT DISTINCT ON (v.id)
-                v.id AS valassis_key,
-                p.id AS parcel_id,
-                1.0::float AS match_score
-            FROM {OUT_SCHEMA}.{VERICAST_NORM} v
-            JOIN {OUT_SCHEMA}.{PARCELS_NORM} p
-              ON v.normalized_house_number = p.normalized_house_number
-              AND v.normalized_street_name = p.normalized_street_name
-            ORDER BY v.id
-        """))
-
-        exact_count = conn.execute(text(
-            f"SELECT COUNT(*) FROM {OUT_SCHEMA}.{WRITE_TABLE}"
-        )).scalar()
-    logger.info("Exact matches: %d", exact_count)
-
-    # Step 4: Fuzzy match remainder
-    logger.info("Step 4: Fuzzy matching remaining addresses...")
+    # Step 3: Full outer join with normalized values preserved
+    logger.info("Step 3: Matching normalized addresses (full outer join)...")
 
     with target.begin() as conn:
         conn.execute(text("CREATE EXTENSION IF NOT EXISTS pg_trgm"))
 
-        conn.execute(text(
-            f"CREATE INDEX IF NOT EXISTS idx_{PARCELS_NORM}_street_trgm "
-            f"ON {OUT_SCHEMA}.{PARCELS_NORM} USING GIN (normalized_street_name gin_trgm_ops)"
-        ))
-
-        result = conn.execute(text(f"""
-            INSERT INTO {OUT_SCHEMA}.{WRITE_TABLE} (valassis_key, parcel_id, match_score)
-            SELECT DISTINCT ON (v.id)
-                v.id AS valassis_key,
-                p.id AS parcel_id,
-                similarity(v.normalized_street_name, p.normalized_street_name)::float AS match_score
-            FROM {OUT_SCHEMA}.{VERICAST_NORM} v
-            JOIN {OUT_SCHEMA}.{PARCELS_NORM} p
-              ON v.normalized_house_number = p.normalized_house_number
-              AND similarity(v.normalized_street_name, p.normalized_street_name) >= 0.5
-            WHERE NOT EXISTS (
-                SELECT 1 FROM {OUT_SCHEMA}.{WRITE_TABLE} l
-                WHERE l.valassis_key = v.id
+        conn.execute(text(f"DROP TABLE IF EXISTS {OUT_SCHEMA}.{WRITE_TABLE}"))
+        conn.execute(text(f"""
+            CREATE TABLE {OUT_SCHEMA}.{WRITE_TABLE} AS
+            WITH best_matches AS (
+                SELECT DISTINCT ON (v.id)
+                    v.id AS valassis_key,
+                    v.normalized_house_number AS vericast_house_number,
+                    v.normalized_street_name AS vericast_street_name,
+                    v.normalized_street_type AS vericast_street_type,
+                    p.id AS parcel_id,
+                    p.normalized_house_number AS parcel_house_number,
+                    p.normalized_street_name AS parcel_street_name,
+                    p.normalized_street_type AS parcel_street_type,
+                    CASE
+                        WHEN v.normalized_street_name = p.normalized_street_name THEN 1.0
+                        ELSE similarity(v.normalized_street_name, p.normalized_street_name)
+                    END::float AS match_score
+                FROM {OUT_SCHEMA}.{VERICAST_NORM} v
+                JOIN {OUT_SCHEMA}.{PARCELS_NORM} p
+                  ON v.normalized_house_number = p.normalized_house_number
+                  AND similarity(v.normalized_street_name, p.normalized_street_name) >= 0.5
+                ORDER BY v.id, similarity(v.normalized_street_name, p.normalized_street_name) DESC
             )
-            ORDER BY v.id, similarity(v.normalized_street_name, p.normalized_street_name) DESC
-        """))
-        fuzzy_count = result.rowcount
-    logger.info("Fuzzy matches: %d", fuzzy_count)
+            -- Matched vericast rows
+            SELECT * FROM best_matches
 
-    # Step 5: Index output, cleanup temp tables
+            UNION ALL
+
+            -- Unmatched vericast rows
+            SELECT
+                v.id AS valassis_key,
+                v.normalized_house_number AS vericast_house_number,
+                v.normalized_street_name AS vericast_street_name,
+                v.normalized_street_type AS vericast_street_type,
+                NULL AS parcel_id,
+                NULL AS parcel_house_number,
+                NULL AS parcel_street_name,
+                NULL AS parcel_street_type,
+                NULL::float AS match_score
+            FROM {OUT_SCHEMA}.{VERICAST_NORM} v
+            WHERE NOT EXISTS (
+                SELECT 1 FROM best_matches b WHERE b.valassis_key = v.id
+            )
+
+            UNION ALL
+
+            -- Unmatched parcel rows
+            SELECT
+                NULL AS valassis_key,
+                NULL AS vericast_house_number,
+                NULL AS vericast_street_name,
+                NULL AS vericast_street_type,
+                p.id AS parcel_id,
+                p.normalized_house_number AS parcel_house_number,
+                p.normalized_street_name AS parcel_street_name,
+                p.normalized_street_type AS parcel_street_type,
+                NULL::float AS match_score
+            FROM {OUT_SCHEMA}.{PARCELS_NORM} p
+            WHERE NOT EXISTS (
+                SELECT 1 FROM best_matches b WHERE b.parcel_id = p.id
+            )
+        """))
+
+        counts = conn.execute(text(f"""
+            SELECT
+                COUNT(*) FILTER (WHERE match_score IS NOT NULL) AS matched,
+                COUNT(*) FILTER (WHERE parcel_id IS NULL) AS unmatched_vericast,
+                COUNT(*) FILTER (WHERE valassis_key IS NULL) AS unmatched_parcels
+            FROM {OUT_SCHEMA}.{WRITE_TABLE}
+        """)).first()
+
+    logger.info(
+        "Matched: %d, Unmatched vericast: %d, Unmatched parcels: %d",
+        counts[0], counts[1], counts[2],
+    )
+
+    # Step 4: Index output, cleanup temp tables
     with target.begin() as conn:
         conn.execute(text(
             f"CREATE INDEX IF NOT EXISTS idx_{WRITE_TABLE}_valassis_key "
@@ -226,5 +255,4 @@ def run(source: Engine, target: Engine) -> TaskResult:
         conn.execute(text(f"DROP TABLE IF EXISTS {OUT_SCHEMA}.{VERICAST_NORM}"))
         conn.execute(text(f"DROP TABLE IF EXISTS {OUT_SCHEMA}.{PARCELS_NORM}"))
 
-    total = exact_count + fuzzy_count
-    return TaskResult(task_name="vacancy_parcel_link", rows_inserted=total, success=True)
+    return TaskResult(task_name="vacancy_parcel_link", rows_inserted=counts[0], success=True)
