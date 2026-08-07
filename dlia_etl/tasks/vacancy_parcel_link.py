@@ -6,7 +6,7 @@ import pandas as pd
 
 from dlia_etl.registry import task, TaskResult
 from dlia_etl.config import IN_SCHEMA, OUT_SCHEMA, PARCEL_TABLE
-from dressy.standardize import standardize_batch
+from dressy.standardize import expand_and_standardize_batch
 
 logger = logging.getLogger(__name__)
 
@@ -57,35 +57,56 @@ def _stop_postal_service(proc):
         logger.info("Postal service stopped")
 
 
+_NORM_COLS = [
+    "id", "normalized_house_number", "normalized_direction",
+    "normalized_street_name", "normalized_street_type",
+]
+
+
+def _split_direction(street_name: str) -> tuple[str, str]:
+    """Split a leading directional (N/S/E/W) off the street name.
+
+    Dressy's normalization puts "E JEFFERSON" in the street_name field.
+    We want direction="E" and name="JEFFERSON" as separate components.
+    """
+    if not street_name:
+        return ("", "")
+    parts = street_name.split(" ", 1)
+    if parts[0] in ("N", "S", "E", "W") and len(parts) > 1:
+        return (parts[0], parts[1])
+    return ("", street_name)
+
+
 def _normalize_chunk(df: pd.DataFrame, address_col: str, id_col: str) -> pd.DataFrame:
-    """Normalize a chunk of addresses through Dressy's batch standardize."""
+    """Expand + standardize a chunk of addresses via libpostal."""
     raw_addresses = df[address_col].astype(str).str.strip().tolist()
     ids = df[id_col].tolist()
 
-    # Filter blanks but keep index alignment
     valid = [(i, raw) for i, raw in zip(ids, raw_addresses) if raw]
     if not valid:
-        return pd.DataFrame(columns=["id", "normalized_house_number", "normalized_street_name", "normalized_street_type"])
+        return pd.DataFrame(columns=_NORM_COLS)
 
     valid_ids, valid_raws = zip(*valid)
 
     try:
-        results = standardize_batch(list(valid_raws))
+        results = expand_and_standardize_batch(list(valid_raws))
     except Exception as e:
-        logger.error("Batch standardize failed: %s", e)
-        return pd.DataFrame(columns=["id", "normalized_house_number", "normalized_street_name", "normalized_street_type"])
+        logger.error("Batch expand+standardize failed: %s", e)
+        return pd.DataFrame(columns=_NORM_COLS)
 
     rows = []
     for id_val, (_, parsed, _) in zip(valid_ids, results):
+        direction, street_name = _split_direction(parsed.street_name)
         rows.append({
             "id": id_val,
             "normalized_house_number": parsed.house_number,
-            "normalized_street_name": parsed.street_name,
+            "normalized_direction": direction,
+            "normalized_street_name": street_name,
             "normalized_street_type": parsed.street_type,
         })
 
     if not rows:
-        return pd.DataFrame(columns=["id", "normalized_house_number", "normalized_street_name", "normalized_street_type"])
+        return pd.DataFrame(columns=_NORM_COLS)
     return pd.DataFrame(rows)
 
 
@@ -124,8 +145,9 @@ def run(source: Engine, target: Engine) -> TaskResult:
 
     with target.begin() as conn:
         conn.execute(text(
-            f"CREATE INDEX IF NOT EXISTS idx_{VERICAST_NORM}_house_street "
-            f"ON {OUT_SCHEMA}.{VERICAST_NORM} (normalized_house_number, normalized_street_name)"
+            f"CREATE INDEX IF NOT EXISTS idx_{VERICAST_NORM}_join "
+            f"ON {OUT_SCHEMA}.{VERICAST_NORM} "
+            f"(normalized_house_number, normalized_direction, normalized_street_name)"
         ))
 
     # Step 2: Normalize parcel addresses
@@ -155,41 +177,48 @@ def run(source: Engine, target: Engine) -> TaskResult:
 
     with target.begin() as conn:
         conn.execute(text(
-            f"CREATE INDEX IF NOT EXISTS idx_{PARCELS_NORM}_house_street "
-            f"ON {OUT_SCHEMA}.{PARCELS_NORM} (normalized_house_number, normalized_street_name)"
+            f"CREATE INDEX IF NOT EXISTS idx_{PARCELS_NORM}_join "
+            f"ON {OUT_SCHEMA}.{PARCELS_NORM} "
+            f"(normalized_house_number, normalized_direction, normalized_street_name)"
         ))
 
-    # Step 3: Full outer join with normalized values preserved
+    # Step 3: Full outer join with strict component matching
+    #
+    # Match requirements (all must be equal):
+    #   - house_number
+    #   - direction (empty string counts — both sides must have same directional or both blank)
+    #   - street_name (post-expansion, no direction/type; the name itself)
+    # street_type is not part of the join because expansion already
+    # canonicalizes it (ST vs STREET both become the same after expand).
     logger.info("Step 3: Matching normalized addresses (full outer join)...")
 
     with target.begin() as conn:
-        conn.execute(text("CREATE EXTENSION IF NOT EXISTS pg_trgm"))
-
         conn.execute(text(f"DROP TABLE IF EXISTS {OUT_SCHEMA}.{WRITE_TABLE}"))
         conn.execute(text(f"""
             CREATE TABLE {OUT_SCHEMA}.{WRITE_TABLE} AS
-            WITH best_matches AS (
+            WITH matches AS (
                 SELECT DISTINCT ON (v.id)
                     v.id AS valassis_key,
                     v.normalized_house_number AS vericast_house_number,
+                    v.normalized_direction AS vericast_direction,
                     v.normalized_street_name AS vericast_street_name,
                     v.normalized_street_type AS vericast_street_type,
                     p.id AS parcel_id,
                     p.normalized_house_number AS parcel_house_number,
+                    p.normalized_direction AS parcel_direction,
                     p.normalized_street_name AS parcel_street_name,
                     p.normalized_street_type AS parcel_street_type,
-                    CASE
-                        WHEN v.normalized_street_name = p.normalized_street_name THEN 1.0
-                        ELSE similarity(v.normalized_street_name, p.normalized_street_name)
-                    END::float AS match_score
+                    1.0::float AS match_score
                 FROM {OUT_SCHEMA}.{VERICAST_NORM} v
                 JOIN {OUT_SCHEMA}.{PARCELS_NORM} p
                   ON v.normalized_house_number = p.normalized_house_number
-                  AND similarity(v.normalized_street_name, p.normalized_street_name) >= 0.5
-                ORDER BY v.id, similarity(v.normalized_street_name, p.normalized_street_name) DESC
+                  AND v.normalized_direction = p.normalized_direction
+                  AND v.normalized_street_name = p.normalized_street_name
+                  AND v.normalized_house_number != ''
+                  AND v.normalized_street_name != ''
+                ORDER BY v.id
             )
-            -- Matched vericast rows
-            SELECT * FROM best_matches
+            SELECT * FROM matches
 
             UNION ALL
 
@@ -197,16 +226,18 @@ def run(source: Engine, target: Engine) -> TaskResult:
             SELECT
                 v.id AS valassis_key,
                 v.normalized_house_number AS vericast_house_number,
+                v.normalized_direction AS vericast_direction,
                 v.normalized_street_name AS vericast_street_name,
                 v.normalized_street_type AS vericast_street_type,
                 NULL AS parcel_id,
                 NULL AS parcel_house_number,
+                NULL AS parcel_direction,
                 NULL AS parcel_street_name,
                 NULL AS parcel_street_type,
                 NULL::float AS match_score
             FROM {OUT_SCHEMA}.{VERICAST_NORM} v
             WHERE NOT EXISTS (
-                SELECT 1 FROM best_matches b WHERE b.valassis_key = v.id
+                SELECT 1 FROM matches m WHERE m.valassis_key = v.id
             )
 
             UNION ALL
@@ -215,16 +246,18 @@ def run(source: Engine, target: Engine) -> TaskResult:
             SELECT
                 NULL AS valassis_key,
                 NULL AS vericast_house_number,
+                NULL AS vericast_direction,
                 NULL AS vericast_street_name,
                 NULL AS vericast_street_type,
                 p.id AS parcel_id,
                 p.normalized_house_number AS parcel_house_number,
+                p.normalized_direction AS parcel_direction,
                 p.normalized_street_name AS parcel_street_name,
                 p.normalized_street_type AS parcel_street_type,
                 NULL::float AS match_score
             FROM {OUT_SCHEMA}.{PARCELS_NORM} p
             WHERE NOT EXISTS (
-                SELECT 1 FROM best_matches b WHERE b.parcel_id = p.id
+                SELECT 1 FROM matches m WHERE m.parcel_id = p.id
             )
         """))
 
